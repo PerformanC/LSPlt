@@ -125,5 +125,15 @@ struct MapInfo {
 /// \note This will be automatically called when the library is unloaded.
 /// \see #RegisterHook()
 [[maybe_unused, gnu::visibility("default")]] bool InvalidateBackup();
+
+/// \brief Reverts all active hooks and clears all internal LSPlt tracking.
+/// This function restores all hooked memory locations to their original content.
+/// For non-self hooks, original memory segments are reinstated from backups, and
+/// temporary hooked memory is released. Original permissions are restored where possible.
+/// All internal LSPlt data (hook registrations, active hook info) is then cleared.
+/// \return True if all hooks were restored and internal state cleared successfully, false otherwise.
+/// \note This function is thread-safe.
+/// \note This function must be called explicitly for complete cleanup; it is not the default unload behavior.
+[[maybe_unused, gnu::visibility("default")]] bool Restore();
 }  // namespace v2
 }  // namespace lsplt

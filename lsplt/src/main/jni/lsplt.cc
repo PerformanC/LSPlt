@@ -241,6 +241,83 @@ public:
         }
         return res;
     }
+
+    bool Restore() {
+        bool all_successful = true;
+
+        for (auto it = this->begin(); it != this->end(); ++it) {
+            HookInfo &info = it->second;
+            const auto len = info.end - info.start;
+
+            LOGD("Processing restoration for %s (0x%" PRIxPTR "-0x%" PRIxPTR ", inode %lu)",
+                 info.path.data(), info.start, info.end, info.inode);
+
+            if (!info.hooks.empty()) {
+                if (!info.self && !( (PROT_READ | PROT_WRITE | info.perms) & PROT_WRITE) && !(info.perms & PROT_WRITE))
+                    LOGW("Memory region %s for non-self hook might not be writable as expected for restoration", info.path.c_str());
+
+                for (auto const& [hooked_addr, original_value] : info.hooks) {
+                    if (hooked_addr < info.start || hooked_addr >= info.end) {
+                        LOGE("Hooked address %p is outside the current map region %s (%p-%p). Skipping restoration for this entry",
+                            (void *)hooked_addr, info.path.c_str(), (void *)info.start, (void *)info.end);
+
+                        all_successful = false;
+
+                        continue;
+                    }
+
+                    auto *target_ptr = reinterpret_cast<uintptr_t *>(hooked_addr);
+                    if (*target_ptr != original_value) {
+                        *target_ptr = original_value;
+                        __builtin___clear_cache(PageStart(hooked_addr), PageEnd(hooked_addr));
+
+                        LOGV("Restored original value at %p to %p in %s",
+                             (void *)hooked_addr, (void *)original_value, info.path.c_str());
+                    }
+                }
+            }
+
+            if (info.backup != 0 && !info.self) {
+                LOGD("Restoring original memory segment for %s from backup location %p",
+                     info.path.c_str(), (void *)info.backup);
+
+                if (auto *restored_addr = sys_mremap(reinterpret_cast<void *>(info.backup), len, len,
+                                   MREMAP_FIXED | MREMAP_MAYMOVE, reinterpret_cast<void *>(info.start));
+                    restored_addr == MAP_FAILED || reinterpret_cast<uintptr_t>(restored_addr) != info.start) {
+
+                    LOGE("sys_mremap failed to restore %s from backup %p (errno %d). Original pages potentially lost",
+                         info.path.c_str(), (void *)info.backup, errno);
+
+                    all_successful = false;
+
+                    if (sys_munmap(reinterpret_cast<void *>(info.backup), len) != 0 && errno != EINVAL)
+                        LOGE("Failed to munmap orphaned backup region %p for %s (errno %d)", (void *)info.backup, info.path.c_str(), errno);
+                } else {
+                    LOGD("Successfully restored original mapping for %s. Backup location %p is now invalid/moved",
+                         info.path.c_str(), (void *)info.backup);
+                }
+
+                info.backup = 0;
+            } else if (info.self && !info.hooks.empty()) {
+                lsplt::MapInfo& original_map_details = static_cast<lsplt::MapInfo&>(info);
+                if (info.perms != original_map_details.perms) {
+                    if (mprotect(reinterpret_cast<void *>(info.start), len, original_map_details.perms) == 0) {
+                        LOGV("Restored original permissions for self-hooked region %s", info.path.c_str());
+
+                        info.perms = original_map_details.perms;
+                    } else {
+                        LOGW("Failed to restore original permissions for self-hooked region %s (errno %d)", info.path.c_str(), errno);
+
+                        all_successful = false;
+                    }
+                }
+            }
+        }
+
+        this->clear();
+
+        return all_successful;
+    }
 };
 
 std::mutex hook_mutex;
@@ -337,5 +414,28 @@ namespace lsplt::inline v2 {
 [[gnu::destructor]] [[maybe_unused]] bool InvalidateBackup() {
     const std::unique_lock lock(hook_mutex);
     return hook_info.InvalidateBackup();
+}
+
+[[maybe_unused]] bool Restore() {
+    std::unique_lock lock(hook_mutex);
+    bool success = true;
+
+    if (!hook_info.empty()) {
+        if (!hook_info.Restore()) success = false;
+
+        LOGD("hook_info processed and cleared");
+    } else {
+        LOGD("hook_info was already empty");
+    }
+
+    if (!register_info.empty()) {
+        LOGD("Clearing %zu entries from register_info", register_info.size());
+
+        register_info.clear();
+    } else {
+        LOGI("register_info was already empty");
+    }
+
+    return success;
 }
 }  // namespace lsplt::inline v2
