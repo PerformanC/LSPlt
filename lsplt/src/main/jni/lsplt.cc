@@ -47,11 +47,11 @@ struct HookInfo : public lsplt::MapInfo {
 
 class HookInfos : public std::map<uintptr_t, HookInfo, std::greater<>> {
 public:
-    static auto ScanHookInfo() {
+    static auto ScanHookInfo(std::vector<lsplt::MapInfo> &maps) {
         static ino_t kSelfInode = 0;
         static dev_t kSelfDev = 0;
         HookInfos info;
-        auto maps = lsplt::MapInfo::Scan();
+
         if (kSelfInode == 0) {
             auto self = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
             for (auto &map : maps) {
@@ -318,11 +318,11 @@ namespace lsplt::inline v2 {
     return true;
 }
 
-[[maybe_unused]] bool CommitHook() {
+[[maybe_unused]] bool CommitHook(std::vector<lsplt::MapInfo> &maps) {
     const std::unique_lock lock(hook_mutex);
     if (register_info.empty()) return true;
 
-    auto new_hook_info = HookInfos::ScanHookInfo();
+    auto new_hook_info = HookInfos::ScanHookInfo(maps);
     if (new_hook_info.empty()) return false;
 
     new_hook_info.Filter(register_info);

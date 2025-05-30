@@ -105,13 +105,14 @@ struct MapInfo {
                                                                size_t size, std::string_view symbol,
                                                                void *callback, void **backup);
 /// \brief Commit all registered hooks.
+/// \param[in] maps The maps where the information of the libraries that will be hooked is stored.
 /// \return Whether all hooks are successfully committed. If any of the hooks fail to commit,
 /// the result is false.
 /// \note This function is thread-safe.
 /// \note The return value indicates whether all hooks are successfully committed. You can
 /// determine which hook fails by checking the backup function pointer of #RegisterHook().
 /// \see #RegisterHook()
-[[maybe_unused, gnu::visibility("default")]] bool CommitHook();
+[[maybe_unused, gnu::visibility("default")]] bool CommitHook(std::vector<MapInfo> &maps);
 
 /// \brief Invalidate backup memory regions
 /// Normally LSPlt will backup the hooked memory region and do hook on a copied anonymous memory
