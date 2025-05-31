@@ -47,7 +47,7 @@ struct HookInfo : public lsplt::MapInfo {
 
 class HookInfos : public std::map<uintptr_t, HookInfo, std::greater<>> {
 public:
-    static auto ScanHookInfo(std::vector<lsplt::MapInfo> &maps) {
+    static auto ScanHookInfo(std::vector<lsplt::MapInfo> maps) {
         static ino_t kSelfInode = 0;
         static dev_t kSelfDev = 0;
         HookInfos info;
@@ -214,35 +214,6 @@ public:
     }
 
     bool InvalidateBackup() {
-        bool res = true;
-        for (auto &[_, info] : *this) {
-            if (!info.backup) continue;
-            for (auto &[addr, backup] : info.hooks) {
-                // store new address to backup since we don't need backup
-                backup = *reinterpret_cast<uintptr_t *>(addr);
-            }
-            auto len = info.end - info.start;
-            if (auto *new_addr =
-                    mremap(reinterpret_cast<void *>(info.backup), len, len,
-                           MREMAP_FIXED | MREMAP_MAYMOVE, reinterpret_cast<void *>(info.start));
-                new_addr == MAP_FAILED || reinterpret_cast<uintptr_t>(new_addr) != info.start) {
-                res = false;
-                info.hooks.clear();
-                continue;
-            }
-            if (!mprotect(PageStart(info.start), len, PROT_WRITE)) {
-                for (auto &[addr, backup] : info.hooks) {
-                    *reinterpret_cast<uintptr_t *>(addr) = backup;
-                }
-                mprotect(PageStart(info.start), len, info.perms);
-            }
-            info.hooks.clear();
-            info.backup = 0;
-        }
-        return res;
-    }
-
-    bool Restore() {
         bool all_successful = true;
 
         for (auto it = this->begin(); it != this->end(); ++it) {
@@ -414,28 +385,5 @@ namespace lsplt::inline v2 {
 [[gnu::destructor]] [[maybe_unused]] bool InvalidateBackup() {
     const std::unique_lock lock(hook_mutex);
     return hook_info.InvalidateBackup();
-}
-
-[[maybe_unused]] bool Restore() {
-    std::unique_lock lock(hook_mutex);
-    bool success = true;
-
-    if (!hook_info.empty()) {
-        if (!hook_info.Restore()) success = false;
-
-        LOGD("hook_info processed and cleared");
-    } else {
-        LOGD("hook_info was already empty");
-    }
-
-    if (!register_info.empty()) {
-        LOGD("Clearing %zu entries from register_info", register_info.size());
-
-        register_info.clear();
-    } else {
-        LOGI("register_info was already empty");
-    }
-
-    return success;
 }
 }  // namespace lsplt::inline v2
