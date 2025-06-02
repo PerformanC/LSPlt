@@ -128,16 +128,10 @@ public:
             auto *backup_addr = sys_mmap(nullptr, len, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
             LOGD("Backup %p to %p", reinterpret_cast<void *>(addr), backup_addr);
             if (backup_addr == MAP_FAILED) return false;
-            if (auto *new_addr =
-                    sys_mremap(reinterpret_cast<void *>(info.start), len, len,
-                               MREMAP_FIXED | MREMAP_MAYMOVE | MREMAP_DONTUNMAP, backup_addr);
+            if (auto *new_addr = sys_mremap(reinterpret_cast<void *>(info.start), len, len,
+                                            MREMAP_FIXED | MREMAP_MAYMOVE, backup_addr);
                 new_addr == MAP_FAILED || new_addr != backup_addr) {
-                new_addr = sys_mremap(reinterpret_cast<void *>(info.start), len, len,
-                           MREMAP_FIXED | MREMAP_MAYMOVE, backup_addr);
-                if (new_addr == MAP_FAILED || new_addr != backup_addr) {
-                    return false;
-                }
-                LOGD("Backup with MREMAP_DONTUNMAP failed, tried without it");
+                return false;
             }
             if (auto *new_addr = sys_mmap(reinterpret_cast<void *>(info.start), len,
                                           PROT_READ | PROT_WRITE | info.perms,
