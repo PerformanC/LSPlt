@@ -192,8 +192,31 @@ public:
                     ++iter;
                     continue;
                 }
+
+                /* INFO: At some point, using FindPltAddr will cause a page-fault, which
+                           increases the Shared Clean of the library, shown in /proc/self/smaps.
+                           To avoid this, we will use cached values, so that we don't have
+                           to call it. */
+                bool is_to_restore = false;
+                for (auto it = this->begin(); it != this->end(); ++it) {
+                    HookInfo &info = it->second;
+
+                    for (const auto &hook : info.hooks) {
+                        if (hook.second != reinterpret_cast<uintptr_t>(reg.callback)) continue;
+
+                        LOGD("Restoring %s from %p via cached address", iter->symbol.data(),
+                                reinterpret_cast<void *>(hook.second));
+
+                        is_to_restore = reg.backup == nullptr;
+
+                        res = DoHook(hook.first, hook.second, nullptr) && res;
+
+                        break;
+                    }
+                }
+
                 if (!info.elf) info.elf = std::make_unique<Elf>(info.start);
-                if (info.elf && info.elf->Valid()) {
+                if (info.elf && info.elf->Valid() && !is_to_restore) {
                     LOGD("Hooking %s", iter->symbol.data());
                     for (auto addr : info.elf->FindPltAddr(reg.symbol)) {
                         res = DoHook(addr, reinterpret_cast<uintptr_t>(reg.callback),
@@ -208,80 +231,32 @@ public:
     }
 
     bool InvalidateBackup() {
-        bool all_successful = true;
-
-        for (auto it = this->begin(); it != this->end(); ++it) {
-            HookInfo &info = it->second;
-            const auto len = info.end - info.start;
-
-            LOGD("Processing restoration for %s (0x%" PRIxPTR "-0x%" PRIxPTR ", inode %lu)",
-                 info.path.data(), info.start, info.end, info.inode);
-
-            if (!info.hooks.empty()) {
-                if (!info.self && !( (PROT_READ | PROT_WRITE | info.perms) & PROT_WRITE) && !(info.perms & PROT_WRITE))
-                    LOGW("Memory region %s for non-self hook might not be writable as expected for restoration", info.path.c_str());
-
-                for (auto const& [hooked_addr, original_value] : info.hooks) {
-                    if (hooked_addr < info.start || hooked_addr >= info.end) {
-                        LOGE("Hooked address %p is outside the current map region %s (%p-%p). Skipping restoration for this entry",
-                            (void *)hooked_addr, info.path.c_str(), (void *)info.start, (void *)info.end);
-
-                        all_successful = false;
-
-                        continue;
-                    }
-
-                    auto *target_ptr = reinterpret_cast<uintptr_t *>(hooked_addr);
-                    if (*target_ptr != original_value) {
-                        *target_ptr = original_value;
-                        __builtin___clear_cache(PageStart(hooked_addr), PageEnd(hooked_addr));
-
-                        LOGV("Restored original value at %p to %p in %s",
-                             (void *)hooked_addr, (void *)original_value, info.path.c_str());
-                    }
-                }
+        bool res = true;
+        for (auto &[_, info] : *this) {
+            if (!info.backup) continue;
+            for (auto &[addr, backup] : info.hooks) {
+                // store new address to backup since we don't need backup
+                backup = *reinterpret_cast<uintptr_t *>(addr);
             }
-
-            if (info.backup != 0 && !info.self) {
-                LOGD("Restoring original memory segment for %s from backup location %p",
-                     info.path.c_str(), (void *)info.backup);
-
-                if (auto *restored_addr = sys_mremap(reinterpret_cast<void *>(info.backup), len, len,
-                                   MREMAP_FIXED | MREMAP_MAYMOVE, reinterpret_cast<void *>(info.start));
-                    restored_addr == MAP_FAILED || reinterpret_cast<uintptr_t>(restored_addr) != info.start) {
-
-                    LOGE("sys_mremap failed to restore %s from backup %p (errno %d). Original pages potentially lost",
-                         info.path.c_str(), (void *)info.backup, errno);
-
-                    all_successful = false;
-
-                    if (sys_munmap(reinterpret_cast<void *>(info.backup), len) != 0 && errno != EINVAL)
-                        LOGE("Failed to munmap orphaned backup region %p for %s (errno %d)", (void *)info.backup, info.path.c_str(), errno);
-                } else {
-                    LOGD("Successfully restored original mapping for %s. Backup location %p is now invalid/moved",
-                         info.path.c_str(), (void *)info.backup);
-                }
-
-                info.backup = 0;
-            } else if (info.self && !info.hooks.empty()) {
-                lsplt::MapInfo& original_map_details = static_cast<lsplt::MapInfo&>(info);
-                if (info.perms != original_map_details.perms) {
-                    if (mprotect(reinterpret_cast<void *>(info.start), len, original_map_details.perms) == 0) {
-                        LOGV("Restored original permissions for self-hooked region %s", info.path.c_str());
-
-                        info.perms = original_map_details.perms;
-                    } else {
-                        LOGW("Failed to restore original permissions for self-hooked region %s (errno %d)", info.path.c_str(), errno);
-
-                        all_successful = false;
-                    }
-                }
+            auto len = info.end - info.start;
+            if (auto *new_addr =
+                    mremap(reinterpret_cast<void *>(info.backup), len, len,
+                           MREMAP_FIXED | MREMAP_MAYMOVE, reinterpret_cast<void *>(info.start));
+                new_addr == MAP_FAILED || reinterpret_cast<uintptr_t>(new_addr) != info.start) {
+                res = false;
+                info.hooks.clear();
+                continue;
             }
+            if (!mprotect(PageStart(info.start), len, PROT_WRITE)) {
+                for (auto &[addr, backup] : info.hooks) {
+                    *reinterpret_cast<uintptr_t *>(addr) = backup;
+                }
+                mprotect(PageStart(info.start), len, info.perms);
+            }
+            info.hooks.clear();
+            info.backup = 0;
         }
-
-        this->clear();
-
-        return all_successful;
+        return res;
     }
 };
 
