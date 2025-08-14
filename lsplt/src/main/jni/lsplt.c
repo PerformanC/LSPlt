@@ -622,7 +622,6 @@ struct lsplt_map_info *lsplt_scan_maps(const char *pid) {
 
   close(sockets[1]);
 
-  int pid_status = 0;
   int fd = read_fd(sockets[0]);
   if (fd < 0) {
     LOGE("Failed to read file descriptor from socket in lsplt_scan_maps");
@@ -734,7 +733,7 @@ struct lsplt_map_info *lsplt_scan_maps(const char *pid) {
       fclose(fp);
       close(sockets[0]);
 
-      waitpid(ppid, &pid_status, 0);
+      waitpid(ppid, NULL, 0);
       return NULL;
   }
 
@@ -761,7 +760,7 @@ struct lsplt_map_info *lsplt_scan_maps(const char *pid) {
   info_array->maps = tmp_maps;
   /* INFO: This waitpid ensures that we only resume code execution once the child dies,
             or the child process will become zombie as shown in /proc/<child_pid>/status */
-  waitpid(ppid, &pid_status, 0);
+  waitpid(ppid, NULL, 0);
   return info_array;
 }
 
