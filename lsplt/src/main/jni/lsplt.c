@@ -12,6 +12,7 @@
 
 #include <unistd.h>
 #include <pthread.h>
+#include <wait.h>
 
 #include "elf_util.h"
 #include "logging.h"
@@ -732,6 +733,8 @@ struct lsplt_map_info *lsplt_scan_maps(const char *pid) {
       fclose(fp);
       close(sockets[0]);
 
+      waitpid(ppid, NULL, 0);
+
       return NULL;
   }
 
@@ -756,6 +759,9 @@ struct lsplt_map_info *lsplt_scan_maps(const char *pid) {
   }
 
   info_array->maps = tmp_maps;
+  /* INFO: This waitpid ensures that we only resume code execution once the child dies,
+            or the child process will become zombie as shown in /proc/<child_pid>/status */
+  waitpid(ppid, NULL, 0);
 
   return info_array;
 }
