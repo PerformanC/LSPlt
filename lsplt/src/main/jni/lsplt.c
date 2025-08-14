@@ -734,6 +734,7 @@ struct lsplt_map_info *lsplt_scan_maps(const char *pid) {
       close(sockets[0]);
 
       waitpid(ppid, NULL, 0);
+
       return NULL;
   }
 
@@ -761,6 +762,7 @@ struct lsplt_map_info *lsplt_scan_maps(const char *pid) {
   /* INFO: This waitpid ensures that we only resume code execution once the child dies,
             or the child process will become zombie as shown in /proc/<child_pid>/status */
   waitpid(ppid, NULL, 0);
+
   return info_array;
 }
 
