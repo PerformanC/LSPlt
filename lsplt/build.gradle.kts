@@ -91,22 +91,16 @@ android {
                         "-D__FILE__=__FILE_NAME__",
                         "-Wl,--exclude-libs,ALL",
                     )
-                    cppFlags("-std=c++20", *flags)
                     cFlags("-std=c18", *flags)
                     val configFlags = arrayOf(
                         "-Oz",
                         "-DNDEBUG"
                     ).joinToString(" ")
                     arguments(
-                        "-DCMAKE_CXX_FLAGS_RELEASE=$configFlags",
                         "-DCMAKE_C_FLAGS_RELEASE=$configFlags",
                         "-DDEBUG_SYMBOLS_PATH=${project.buildDir.absolutePath}/symbols/$name",
                         "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
                     )
-                    findInPath("ccache")?.let {
-                        println("Using ccache $it")
-                        arguments += "-DANDROID_CCACHE=$it"
-                    }
                 }
             }
         }
@@ -119,17 +113,8 @@ android {
                     "-fno-asynchronous-unwind-tables",
                 )
                 cmake {
-                    cppFlags += flags
                     cFlags += flags
-                    arguments += "-DANDROID_STL=c++_shared"
                     arguments += "-DCMAKE_BUILD_TYPE=Release"
-                }
-            }
-        }
-        debug {
-            externalNativeBuild {
-                cmake {
-                    arguments += "-DANDROID_STL=c++_shared"
                 }
             }
         }
@@ -143,11 +128,9 @@ android {
                     "-fno-asynchronous-unwind-tables",
                 )
                 cmake {
-                    cppFlags += flags
                     cFlags += flags
                     arguments += "-DANDROID_STL=none"
                     arguments += "-DCMAKE_BUILD_TYPE=Release"
-                    arguments += "-DLSPLT_STANDALONE=ON"
                 }
             }
         }
@@ -257,9 +240,6 @@ publishing {
                 password = System.getenv("GITHUB_TOKEN")
             }
         }
-    }
-    dependencies {
-        "standaloneCompileOnly"("dev.rikka.ndk.thirdparty:cxx:1.2.0")
     }
 }
 
