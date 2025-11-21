@@ -452,12 +452,11 @@ static bool do_hooks_for_all_registered(struct lsplt_hook_infos *infos) {
     }
   }
 
-  cleanup:
-    for (size_t i = 0; i < symbol_addresses_length; ++i) {
-      free(symbol_addresses[i].addresses);
-    }
+  for (size_t i = 0; i < symbol_addresses_length; ++i) {
+    free(symbol_addresses[i].addresses);
+  }
 
-    free(symbol_addresses);
+  free(symbol_addresses);
 
   return overall_res;
 }
