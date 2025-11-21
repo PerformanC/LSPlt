@@ -915,7 +915,7 @@ bool lsplt_register_hook_internal(dev_t dev, ino_t inode, uintptr_t offset, size
 
   pthread_mutex_unlock(&g_hook_mutex);
 
-  LOGV("RegisterHook %lu %s", new_node->inode, new_node->symbol);
+  LOGV("RegisterHook %lu %s%s", new_node->inode, new_node->symbol, new_node->is_prefix ? " (prefix)" : "");
 
   return true;
 }
