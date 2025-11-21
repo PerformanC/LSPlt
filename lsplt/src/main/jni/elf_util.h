@@ -46,4 +46,6 @@ void elfutil_init(struct Elf *elf, uintptr_t base_addr);
 
 size_t elfutil_find_plt_addr(const struct Elf *elf, const char *name, uintptr_t **out_addrs);
 
+size_t elfutil_find_plt_addr_by_prefix(const struct Elf *elf, const char *name_prefix, uintptr_t **out_addrs);
+
 #endif /* LSPLT_ELF_UTIL_H */

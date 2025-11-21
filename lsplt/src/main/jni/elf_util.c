@@ -231,7 +231,7 @@ static uint32_t elfutil_gnu_lookup(const struct Elf *elf, const char *name) {
   static uint32_t kInitialHash = 5381;
   static uint32_t kHashShift = 5;
 
-  if (!elf->bucket_ || !elf->bloom_) return 0;
+  if (!elf->bucket_ || !elf->bloom_ || !elf->bloom_size_) return 0;
 
   uint32_t hash = kInitialHash;
   for (int i = 0; name[i]; i++) {
@@ -242,14 +242,15 @@ static uint32_t elfutil_gnu_lookup(const struct Elf *elf, const char *name) {
   uintptr_t mask = 0 | (uintptr_t)1 << (hash % kBloomMaskBits) | (uintptr_t)1 << ((hash >> elf->bloom_shift_) % kBloomMaskBits);
   if ((mask & bloom_word) == mask) {
     int idx = elf->bucket_[hash % elf->bucket_count_];
-    if ((uint32_t) idx >= elf->sym_offset_) {
-      const char *strings = elf->dyn_str_;
-      do {
-        ElfW(Sym) *sym = elf->dyn_sym_ + idx;
-        if (((elf->chain_[idx] ^ hash) >> 1) == 0 && strcmp(name, strings + sym->st_name) == 0)
-          return idx;
-      } while ((elf->chain_[idx++] & 1) == 0);
-    }
+    const char *strings = elf->dyn_str_;
+
+    do {
+      if ((uint32_t)idx >= elf->sym_offset_) break;
+
+      ElfW(Sym) *sym = elf->dyn_sym_ + idx;
+      if (((elf->chain_[idx] ^ hash) >> 1) == 0 && strcmp(name, strings + sym->st_name) == 0)
+        return idx;
+    } while ((elf->chain_[idx++] & 1) == 0);
   }
 
   return 0;
@@ -293,7 +294,8 @@ static uint32_t elfutil_linear_lookup(const struct Elf *elf, const char *name) {
   return 0;
 }
 
-static void elfutil_looper(const struct Elf *elf, uint32_t idx, const void *rel_ptr, const ElfW(Word) rel_size, bool is_plt, uintptr_t **res, size_t *res_size) {
+static void elfutil_looper(const struct Elf *elf, uint32_t idx, const void *rel_ptr, const ElfW(Word) rel_size,
+                           bool is_plt, uintptr_t **res, size_t *res_size) {
   const void *rel_end = (const void *)((uintptr_t)rel_ptr + rel_size);
 
   size_t rel_entry_size = elf->is_use_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
@@ -343,6 +345,68 @@ size_t elfutil_find_plt_addr(const struct Elf *elf, const char *name, uintptr_t 
   elfutil_looper(elf, idx, (void *)elf->rel_plt_,     elf->rel_plt_size_,     true,  out_addrs, &count);
   elfutil_looper(elf, idx, (void *)elf->rel_dyn_,     elf->rel_dyn_size_,     false, out_addrs, &count);
   elfutil_looper(elf, idx, (void *)elf->rel_android_, elf->rel_android_size_, false, out_addrs, &count);
+
+  return count;
+}
+
+static void elfutil_looper_by_prefix(const struct Elf *elf, const void *rel_ptr, const ElfW(Word) rel_size,
+                                     bool is_plt, const char *name_prefix, size_t prefix_len,
+                                     uintptr_t **res, size_t *res_size) {
+  if (!rel_ptr || rel_size == 0 || !elf->dyn_sym_ || !elf->dyn_str_) return;
+
+  const void *rel_end = (const void *)((uintptr_t)rel_ptr + rel_size);
+  size_t rel_entry_size = elf->is_use_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
+
+  for (const char *p = (const char *)rel_ptr; p < (const char *)rel_end; p += rel_entry_size) {
+    ElfW(Xword) r_info   = elf->is_use_rela_ ? ((const ElfW(Rela) *)p)->r_info : ((const ElfW(Rel) *)p)->r_info;
+    ElfW(Addr)  r_offset = elf->is_use_rela_ ? ((const ElfW(Rela) *)p)->r_offset : ((const ElfW(Rel) *)p)->r_offset;
+    uint32_t    r_sym    = ELF_R_SYM(r_info);
+    uint32_t    r_type   = ELF_R_TYPE(r_info);
+
+    if (is_plt && r_type != ELF_R_GENERIC_JUMP_SLOT) continue;
+    if (!is_plt && (r_type != ELF_R_GENERIC_ABS && r_type != ELF_R_GENERIC_GLOB_DAT)) continue;
+
+    ElfW(Sym) *sym = elf->dyn_sym_ + r_sym;
+    if (!sym || sym->st_name == 0) continue;
+
+    const char *sym_name = elf->dyn_str_ + sym->st_name;
+    if (!sym_name || strncmp(sym_name, name_prefix, prefix_len) != 0) continue;
+
+    LOGD("Found symbol by prefix: %s", sym_name);
+
+    uintptr_t addr = elf->bias_addr_ + r_offset;
+    if (addr <= elf->base_addr_) continue;
+
+    uintptr_t *new_res = (uintptr_t *)realloc(*res, (*res_size + 1) * sizeof(uintptr_t));
+    if (!new_res) {
+      LOGE("Failed to allocate memory for PLT addresses");
+
+      free(*res);
+      *res = NULL;
+      *res_size = 0;
+
+      return;
+    }
+
+    *res = new_res;
+    (*res)[*res_size] = addr;
+    (*res_size)++;
+  }
+}
+
+size_t elfutil_find_plt_addr_by_prefix(const struct Elf *elf, const char *name_prefix, uintptr_t **out_addrs) {
+  if (!elf->valid_ || out_addrs == NULL) return 0;
+
+  size_t prefix_len = strlen(name_prefix);
+
+  size_t count = 0;
+  uintptr_t *res = NULL;
+
+  elfutil_looper_by_prefix(elf, (void *)elf->rel_plt_,     elf->rel_plt_size_,     true,  name_prefix, prefix_len, &res, &count);
+  elfutil_looper_by_prefix(elf, (void *)elf->rel_dyn_,     elf->rel_dyn_size_,     false, name_prefix, prefix_len, &res, &count);
+  elfutil_looper_by_prefix(elf, (void *)elf->rel_android_, elf->rel_android_size_, false, name_prefix, prefix_len, &res, &count);
+
+  *out_addrs = res;
 
   return count;
 }

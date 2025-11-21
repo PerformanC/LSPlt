@@ -22,9 +22,13 @@
 struct lsplt_register_info {
   dev_t dev;
   ino_t inode;
+
   uintptr_t offset_range_start;
   uintptr_t offset_range_end;
+
   char *symbol;
+  bool is_prefix;
+
   void *callback;
   void **backup;
 };
@@ -75,6 +79,15 @@ static inline char *page_end(uintptr_t addr) {
   if (k_page_size == 0) k_page_size = getpagesize();
 
   return (char *)((addr / k_page_size * k_page_size) + k_page_size);
+}
+
+static inline void *lsplt_memcpy(void *dst, const void *src, size_t len) {
+  unsigned char *d = (unsigned char *)dst;
+  const unsigned char *s = (const unsigned char *)src;
+
+  while (len--) *d++ = *s++;
+
+  return dst;
 }
 
 static bool hook_info_match(const struct lsplt_hook_info *info, const struct lsplt_register_info *reg) {
@@ -204,8 +217,10 @@ static bool filter_hook_infos(struct lsplt_hook_infos *infos) {
            info->map.path, info->map.inode, info->map.start,
            info->map.end, info->map.offset);
 
-      if (write_idx != read_idx)
+      if (write_idx != read_idx) {
         infos->infos[write_idx] = infos->infos[read_idx];
+        memset(&infos->infos[read_idx], 0, sizeof(struct lsplt_hook_info));
+      }
 
       write_idx++;
     } else {
@@ -236,7 +251,7 @@ static bool filter_hook_infos(struct lsplt_hook_infos *infos) {
     return false;
   }
 
-  infos->infos = tmp_infos;
+  if (tmp_infos) infos->infos = tmp_infos;
   /* INFO: Only update if realloc doesn't fail */
   infos->length = write_idx;
 
@@ -316,8 +331,20 @@ static bool merge_hook_infos(struct lsplt_hook_infos *new_infos, struct lsplt_ho
 
 static bool do_hook_addr(struct lsplt_hook_infos *infos, uintptr_t addr, uintptr_t callback, uintptr_t *backup);
 
+struct hook_symbol_info {
+  void **addresses;
+  size_t length;
+
+  void *callback;
+  void *backup;
+};
+
 static bool do_hooks_for_all_registered(struct lsplt_hook_infos *infos) {
   bool overall_res = true;
+
+  struct hook_symbol_info *symbol_addresses = NULL;
+  size_t symbol_addresses_length = 0;
+
   for (size_t i = 0; i < infos->length; ++i) {
     struct lsplt_hook_info *info = &infos->infos[i];
 
@@ -352,27 +379,85 @@ static bool do_hooks_for_all_registered(struct lsplt_hook_infos *infos) {
 
       if (info->elf.valid_ && !is_to_restore) {
         uintptr_t *addrs = NULL;
-        size_t addrs_length = elfutil_find_plt_addr(&info->elf, reg->symbol, &addrs);
+        size_t addrs_length;
+        if (!reg->is_prefix) addrs_length = elfutil_find_plt_addr(&info->elf, reg->symbol, &addrs);
+        else addrs_length = elfutil_find_plt_addr_by_prefix(&info->elf, reg->symbol, &addrs);
+
         if (addrs_length == 0) {
           LOGE("Failed to find PLT address for %s in %s", reg->symbol, info->map.path);
 
           overall_res = false;
 
+          free(addrs);
+          addrs = NULL;
+
           goto delete_reg;
         }
 
-        for (size_t j = 0; j < addrs_length; ++j) {
-          overall_res = do_hook_addr(infos, addrs[j], (uintptr_t)reg->callback, (uintptr_t *)reg->backup) && overall_res;
+        struct hook_symbol_info *tmp_symbol_addresses = realloc(symbol_addresses,
+                                                                (symbol_addresses_length + 1) * sizeof(*symbol_addresses));
+        if (!tmp_symbol_addresses) {
+          PLOGE("allocate memory for symbol addresses");
+
+          overall_res = false;
+
+          free(addrs);
+          addrs = NULL;
+
+          goto delete_reg;
         }
 
-        free(addrs);
+        symbol_addresses = tmp_symbol_addresses;
+
+        struct hook_symbol_info *sym_addr = &symbol_addresses[symbol_addresses_length++];
+        sym_addr->addresses = (void **)addrs;
+        sym_addr->length = addrs_length;
+        sym_addr->callback = reg->callback;
+        sym_addr->backup = reg->backup;
       }
 
-      delete_reg:
-        free(reg->symbol);
-        memset(reg, 0, sizeof(struct lsplt_register_info));
+      free(reg->symbol);
+      reg->symbol = NULL;
+
+      continue;
+
+    delete_reg:
+      free(reg->symbol);
+      reg->symbol = NULL;
+
+      if (j < g_register_info_list->length - 1) {
+        memmove(&g_register_info_list->infos[j], &g_register_info_list->infos[j + 1],
+                (g_register_info_list->length - j - 1) * sizeof(struct lsplt_register_info));
+      }
+
+      if (g_register_info_list->length > 0) {
+        memset(&g_register_info_list->infos[g_register_info_list->length - 1], 0,
+               sizeof(struct lsplt_register_info));
+        g_register_info_list->length--;
+      }
+
+      if (j != 0) j--;
+
+      break;
     }
   }
+
+  if (overall_res) {
+    for (size_t i = 0; i < symbol_addresses_length; ++i) {
+      struct hook_symbol_info *sym_info = &symbol_addresses[i];
+
+      for (size_t j = 0; j < sym_info->length; ++j) {
+        overall_res = do_hook_addr(infos, (uintptr_t)sym_info->addresses[j], (uintptr_t)sym_info->callback, (uintptr_t *)sym_info->backup) && overall_res;
+      }
+    }
+  }
+
+  cleanup:
+    for (size_t i = 0; i < symbol_addresses_length; ++i) {
+      free(symbol_addresses[i].addresses);
+    }
+
+    free(symbol_addresses);
 
   return overall_res;
 }
@@ -419,14 +504,17 @@ static bool do_hook_addr(struct lsplt_hook_infos *infos, uintptr_t addr, uintptr
 
     new_addr = sys_mmap((void *)info->map.start, len, PROT_READ | PROT_WRITE | info->map.perms, MAP_PRIVATE | MAP_FIXED | MAP_ANON, -1, 0);
     if (new_addr == MAP_FAILED) {
-      LOGE("Failed to remap %p to original %p", backup_addr, (void *)info->map.start);
+      void *restore_addr = sys_mremap(backup_addr, len, len, MREMAP_FIXED | MREMAP_MAYMOVE, (void *)info->map.start);
+      if (restore_addr == MAP_FAILED || restore_addr != (void *)info->map.start) {
+        return false;
+      }
 
-      sys_munmap(backup_addr, len);
+      LOGE("Failed to remap %p to original %p", backup_addr, (void *)info->map.start);
 
       return false;
     }
 
-    memcpy((void *)info->map.start, backup_addr, len);
+    lsplt_memcpy((void *)info->map.start, backup_addr, len);
     info->backup_region = (uintptr_t)backup_addr;
   }
 
@@ -775,7 +863,7 @@ void lsplt_free_maps(struct lsplt_map_info *maps) {
 }
 
 bool lsplt_register_hook_internal(dev_t dev, ino_t inode, uintptr_t offset, size_t size,
-                                  const char *symbol, void *callback, void **backup) {
+                                  const char *symbol, bool is_prefix, void *callback, void **backup) {
   if (dev == 0 || inode == 0 || !symbol || symbol[0] == '\0' || !callback) {
     LOGE("Invalid parameters for lsplt_register_hook_internal: dev=%lu, inode=%lu, symbol=%s, callback=%p",
          (unsigned long)dev, (unsigned long)inode, symbol ? symbol : "NULL", callback);
@@ -786,7 +874,6 @@ bool lsplt_register_hook_internal(dev_t dev, ino_t inode, uintptr_t offset, size
   pthread_mutex_lock(&g_hook_mutex);
   if (!g_register_info_list) {
     g_register_info_list = calloc(1, sizeof(struct lsplt_register_infos));
-
     if (!g_register_info_list) {
       PLOGE("allocate memory for register info list");
 
@@ -819,6 +906,7 @@ bool lsplt_register_hook_internal(dev_t dev, ino_t inode, uintptr_t offset, size
     return false;
   }
 
+  new_node->is_prefix = is_prefix;
   new_node->dev = dev;
   new_node->inode = inode;
   new_node->offset_range_start = offset;
@@ -834,12 +922,16 @@ bool lsplt_register_hook_internal(dev_t dev, ino_t inode, uintptr_t offset, size
 }
 
 bool lsplt_register_hook(dev_t dev, ino_t inode, const char *symbol, void *callback, void **backup) {
-  return lsplt_register_hook_internal(dev, inode, 0, UINTPTR_MAX, symbol, callback, backup);
+  return lsplt_register_hook_internal(dev, inode, 0, UINTPTR_MAX, symbol, false, callback, backup);
+}
+
+bool lsplt_register_hook_by_prefix(dev_t dev, ino_t inode, const char *symbol_prefix, void *callback, void **backup) {
+  return lsplt_register_hook_internal(dev, inode, 0, UINTPTR_MAX, symbol_prefix, true, callback, backup);
 }
 
 bool lsplt_register_hook_with_offset(dev_t dev, ino_t inode, uintptr_t offset, size_t size,
                                      const char *symbol, void *callback, void **backup) {
-  return lsplt_register_hook_internal(dev, inode, offset, size, symbol, callback, backup);
+  return lsplt_register_hook_internal(dev, inode, offset, size, symbol, false, callback, backup);
 }
 
 bool lsplt_commit_hook_manual(struct lsplt_map_info *maps) {
@@ -889,7 +981,7 @@ bool lsplt_commit_hook_manual(struct lsplt_map_info *maps) {
   return result;
 }
 
-bool lsplt_commit_hook() {
+bool lsplt_commit_hook(void) {
   struct lsplt_map_info *maps = lsplt_scan_maps("self");
   if (!maps) {
     LOGE("Failed to scan maps for self");
@@ -910,7 +1002,7 @@ bool lsplt_commit_hook() {
   return true;
 }
 
-bool invalidate_backups() {
+bool invalidate_backups(void) {
   pthread_mutex_lock(&g_hook_mutex);
 
   bool res = true;
@@ -923,7 +1015,7 @@ bool invalidate_backups() {
     }
 
     size_t len = info->map.end - info->map.start;
-    void *new_addr = mremap((void *)info->backup_region, len, len, MREMAP_FIXED | MREMAP_MAYMOVE, (void *)info->map.start);
+    void *new_addr = sys_mremap((void *)info->backup_region, len, len, MREMAP_FIXED | MREMAP_MAYMOVE, (void *)info->map.start);
     if (new_addr == MAP_FAILED || (uintptr_t)new_addr != info->map.start) {
       LOGF("Failed to remap backup region %p to original %p", (void *)info->backup_region, (void *)info->map.start);
 
@@ -948,7 +1040,7 @@ bool invalidate_backups() {
   return res;
 }
 
-void lsplt_free_resources() {
+void lsplt_free_resources(void) {
   pthread_mutex_lock(&g_hook_mutex);
 
   if (g_hook_infos) {

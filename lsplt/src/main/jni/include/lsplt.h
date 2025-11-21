@@ -60,6 +60,20 @@ void lsplt_free_maps(struct lsplt_map_info *maps);
 bool lsplt_register_hook(dev_t dev, ino_t inode, const char *symbol, void *callback, void **backup);
 
 /**
+ * @brief Registers a function hook for a specific symbol by matching
+ *        the prefix of the symbol name within a library.
+ *
+ * @param dev The device ID of the library's file system.
+ * @param inode The inode number of the library file.
+ * @param symbol_prefix The prefix of the symbol name to hook.
+ * @param callback The function to be called instead of the original symbol.
+ * @param backup A pointer to store the address of the original function. Can be NULL.
+ * 
+ * @return True on success, false on failure.
+ */
+bool lsplt_register_hook_by_prefix(dev_t dev, ino_t inode, const char *symbol_prefix, void *callback, void **backup);
+
+/**
  * @brief Registers a function hook for a specific symbol within a defined offset range
  *        of a library.
  *
@@ -98,7 +112,7 @@ bool lsplt_commit_hook_manual(struct lsplt_map_info *maps);
  *
  * @return True if all hooks were applied successfully, false otherwise.
  */
-bool lsplt_commit_hook();
+bool lsplt_commit_hook(void);
 
 /**
  * @brief Invalidates all backups created by the hooks.
@@ -108,7 +122,7 @@ bool lsplt_commit_hook();
  * 
  * @return True if the backups were invalidated successfully, false otherwise.
  */
-bool invalidate_backups();
+bool invalidate_backups(void);
 
 /**
  * @brief Frees all resources allocated by the library.
@@ -118,7 +132,7 @@ bool invalidate_backups();
  * 
  * @return void
  */
-void lsplt_free_resources();
+void lsplt_free_resources(void);
 
 #ifdef __cplusplus
 }
