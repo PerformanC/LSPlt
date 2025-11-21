@@ -1,6 +1,5 @@
 # LSPlt
 
-
 ![](https://img.shields.io/badge/license-LGPL--3.0-orange.svg)
 ![](https://img.shields.io/badge/Android-5.0%20--%2015-blue.svg)
 ![](https://img.shields.io/badge/arch-armeabi--v7a%20%7C%20arm64--v8a%20%7C%20x86%20%7C%20x86--64%20%7C%20riscv64-brightgreen.svg)
@@ -12,3 +11,7 @@ A simple PLT hook for Android.
 ### Docs
 
 Check https://lsposed.org/LSPlt/namespacelsplt.html for the documentation.
+
+### License
+
+This project is licensed under BSD 3-Clause License. See the [LICENSE](./LICENSE) file for details. 
