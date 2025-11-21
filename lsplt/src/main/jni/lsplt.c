@@ -112,7 +112,7 @@ static int compare_hook_infos_desc(const void *a, const void *b) {
 static struct lsplt_hook_infos *scan_and_create_hook_infos(struct lsplt_map_info *maps) {
   struct lsplt_hook_infos *new_infos = calloc(1, sizeof(struct lsplt_hook_infos));
   if (!new_infos) {
-    LOGE("Failed to allocate memory for hook infos");
+    PLOGE("allocate memory for hook infos");
 
     return NULL;
   }
@@ -229,7 +229,9 @@ static bool filter_hook_infos(struct lsplt_hook_infos *infos) {
   if (!tmp_infos) {
     /* INFO: If it fails, it doesn't necessarily will cause issues, it will just bloat
                the structure. */
-    LOGE("Failed to reallocate memory for hook infos");
+    PLOGE("reallocate memory for hook infos");
+
+    free_hook_infos(infos);
 
     return false;
   }
@@ -291,7 +293,7 @@ static bool merge_hook_infos(struct lsplt_hook_infos *new_infos, struct lsplt_ho
     if (!found_in_new) {
       struct lsplt_hook_info *tmp_infos = realloc(new_infos->infos, (new_infos->length + 1) * sizeof(struct lsplt_hook_info));
       if (!tmp_infos) {
-        LOGE("Failed to reallocate for merging hooks infos");
+        PLOGE("reallocate for merging hooks infos");
 
         return false;
       }
@@ -643,7 +645,7 @@ struct lsplt_map_info *lsplt_scan_maps(const char *pid) {
 
   struct lsplt_map_info *info_array = calloc(1, sizeof(struct lsplt_map_info));
   if (!info_array) {
-    LOGE("Failed to allocate memory for lsplt_map_info");
+    PLOGE("allocate memory for lsplt_map_info");
 
     close(fd);
     close(sockets[0]);
@@ -654,7 +656,7 @@ struct lsplt_map_info *lsplt_scan_maps(const char *pid) {
   size_t infos_capacity = 2;
   info_array->maps = malloc(infos_capacity * sizeof(struct lsplt_map_entry));
   if (!info_array->maps) {
-    LOGE("Failed to allocate memory for maps in lsplt_scan_maps");
+    PLOGE("allocate memory for maps in lsplt_scan_maps");
 
     free(info_array);
 
@@ -690,7 +692,7 @@ struct lsplt_map_info *lsplt_scan_maps(const char *pid) {
 
     char *path_str = strdup(line + path_off);
     if (!path_str) {
-      LOGE("Failed to allocate memory for map path in lsplt_scan_maps");
+      PLOGE("allocate memory for map path in lsplt_scan_maps");
 
       goto cleanup_maps;
     }
@@ -699,7 +701,7 @@ struct lsplt_map_info *lsplt_scan_maps(const char *pid) {
       infos_capacity *= 2;
       struct lsplt_map_entry *tmp_maps = realloc(info_array->maps, infos_capacity * sizeof(struct lsplt_map_entry));
       if (!tmp_maps) {
-        LOGE("Failed to reallocate memory for maps in lsplt_scan_maps");
+        PLOGE("reallocate memory for maps in lsplt_scan_maps");
 
         goto cleanup_maps_and_path;
       }
@@ -752,13 +754,10 @@ struct lsplt_map_info *lsplt_scan_maps(const char *pid) {
 
   /* INFO: Resize to the actual size */
   struct lsplt_map_entry *tmp_maps = realloc(info_array->maps, info_array->length * sizeof(struct lsplt_map_entry));
-  if (!tmp_maps) {
-    LOGE("Failed to reallocate memory for maps in lsplt_scan_maps");
+  if (!tmp_maps)
+    PLOGE("reallocate memory for maps in lsplt_scan_maps");
 
-    goto cleanup_maps;
-  }
-
-  info_array->maps = tmp_maps;
+  if (tmp_maps) info_array->maps = tmp_maps;
   /* INFO: This waitpid ensures that we only resume code execution once the child dies,
             or the child process will become zombie as shown in /proc/<child_pid>/status */
   waitpid(ppid, NULL, 0);
@@ -789,7 +788,7 @@ bool lsplt_register_hook_internal(dev_t dev, ino_t inode, uintptr_t offset, size
     g_register_info_list = calloc(1, sizeof(struct lsplt_register_infos));
 
     if (!g_register_info_list) {
-      LOGE("Failed to allocate memory for register info list");
+      PLOGE("allocate memory for register info list");
 
       pthread_mutex_unlock(&g_hook_mutex);
 
@@ -799,7 +798,7 @@ bool lsplt_register_hook_internal(dev_t dev, ino_t inode, uintptr_t offset, size
 
   struct lsplt_register_info *tmp_list = realloc(g_register_info_list->infos, (g_register_info_list->length + 1) * sizeof(struct lsplt_register_info));
   if (!tmp_list) {
-    LOGE("Failed to allocate memory for register info list");
+    PLOGE("reallocate memory for register info list");
 
     pthread_mutex_unlock(&g_hook_mutex);
 
@@ -863,7 +862,7 @@ bool lsplt_commit_hook_manual(struct lsplt_map_info *maps) {
   }
 
   if (!filter_hook_infos(new_hook_infos)) {
-    LOGV("No hook infos matched, freeing");
+    LOGE("No hook infos matched, freeing");
 
     free_hook_infos(new_hook_infos);
     pthread_mutex_unlock(&g_hook_mutex);
