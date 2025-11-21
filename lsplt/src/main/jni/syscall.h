@@ -2,7 +2,8 @@
 #define LSPLT_SYSCALL_H
 
 #include <errno.h>
-
+#include <unistd.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 
 #define CHECK_SYSCALL_ERROR(res)                      \
@@ -38,13 +39,16 @@ static __attribute__((always_inline)) inline void *sys_mmap(void *addr, size_t l
     register long r3 __asm__("r3") = (long)flags;
     register long r4 __asm__("r4") = (long)fd;
     register long r5 __asm__("r5") = (long)(offset / k_page_size);
-    register long r7 __asm__("r7") = SYS_mmap2;
+    long scno = __NR_mmap2;
 
     __asm__ volatile(
-      "svc #0"
+      "mov r12, r7\n\t"
+      "mov r7, %[sc]\n\t"
+      "svc #0\n\t"
+      "mov r7, r12"
       : "+r"(r0)
-      : "r"(r1), "r"(r2), "r"(r3), "r"(r4), "r"(r5), "r"(r7)
-      : "cc", "memory"
+      : [sc]"r"(scno), "r"(r1), "r"(r2), "r"(r3), "r"(r4), "r"(r5)
+      : "r12", "cc", "memory"
     );
 
     result = (void *)r0;
@@ -74,7 +78,7 @@ static __attribute__((always_inline)) inline void *sys_mmap(void *addr, size_t l
       : "=a"(result)
       : "a"(SYS_mmap2), "b"(addr), "c"(length), "d"(prot),
       "S"(flags), "D"(fd), [ofs]"g"(offset / k_page_size)
-      : "memory", "cc", "ebp"
+      : "memory", "cc"
     );
   #elif defined(__x86_64__)
     register long rdi __asm__("rdi") = (long)addr;
@@ -126,13 +130,16 @@ static __attribute__((always_inline)) inline void *sys_mremap(void *old_address,
     register long r2 __asm__("r2") = (long)new_size;
     register long r3 __asm__("r3") = (long)flags;
     register long r4 __asm__("r4") = (long)new_address;
-    register long r7 __asm__("r7") = SYS_mremap;
+    long scno = SYS_mremap;
 
     __asm__ volatile(
-      "svc #0"
+      "mov r12, r7\n\t"
+      "mov r7, %[sc]\n\t"
+      "svc #0\n\t"
+      "mov r7, r12"
       : "+r"(r0)
-      : "r"(r1), "r"(r2), "r"(r3), "r"(r4), "r"(r7)
-      : "cc", "memory"
+      : [sc]"r"(scno), "r"(r1), "r"(r2), "r"(r3), "r"(r4)
+      : "r12", "cc", "memory"
     );
 
     result = (void *)r0;
@@ -205,14 +212,18 @@ static __attribute__((always_inline)) inline int sys_munmap(void *addr, size_t l
   #if defined(__arm__)
     register long r0 __asm__("r0") = (long)addr;
     register long r1 __asm__("r1") = (long)length;
-    register long r7 __asm__("r7") = SYS_munmap;
+    long scno = SYS_munmap;
 
     __asm__ volatile(
-      "svc #0"
+      "mov r12, r7\n\t"
+      "mov r7, %[sc]\n\t"
+      "svc #0\n\t"
+      "mov r7, r12"
       : "+r"(r0)
-      : "r"(r1), "r"(r7)
-      : "cc", "memory"
+      : [sc]"r"(scno), "r"(r1)
+      : "r12", "cc", "memory"
     );
+
     result = r0;
   #elif defined(__aarch64__)
     register long x0 __asm__("x0") = (long)addr;
@@ -225,6 +236,7 @@ static __attribute__((always_inline)) inline int sys_munmap(void *addr, size_t l
       : "r"(x1), "r"(x8)
       : "cc", "memory"
     );
+
     result = x0;
   #elif defined(__i386__)
     __asm__ volatile(
@@ -244,6 +256,7 @@ static __attribute__((always_inline)) inline int sys_munmap(void *addr, size_t l
       : "r"(rdi), "r"(rsi)
       : "rcx", "r11", "cc", "memory"
     );
+
     result = rax;
   #elif defined(__riscv)
     __asm__ volatile(
