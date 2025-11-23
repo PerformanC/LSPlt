@@ -242,17 +242,13 @@ static bool filter_hook_infos(struct lsplt_hook_infos *infos) {
              using too much memory unnecessarily. */
   struct lsplt_hook_info *tmp_infos = realloc(infos->infos, write_idx * sizeof(struct lsplt_hook_info));
   if (!tmp_infos) {
-    /* INFO: If it fails, it doesn't necessarily will cause issues, it will just bloat
-               the structure. */
+    /* INFO: If it fails, it doesn't necessarily cause issues, it will just bloat
+             the structure. */
     PLOGE("reallocate memory for hook infos");
-
-    free_hook_infos(infos);
-
-    return false;
+  } else {
+    infos->infos = tmp_infos;
   }
 
-  if (tmp_infos) infos->infos = tmp_infos;
-  /* INFO: Only update if realloc doesn't fail */
   infos->length = write_idx;
 
   return true;
