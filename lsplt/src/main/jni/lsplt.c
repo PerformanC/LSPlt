@@ -902,6 +902,8 @@ bool lsplt_register_hook_internal(dev_t dev, ino_t inode, uintptr_t offset, size
     g_register_info_list->length--;
     memset(new_node, 0, sizeof(struct lsplt_register_info));
 
+    pthread_mutex_unlock(&g_hook_mutex);
+
     return false;
   }
 
@@ -1003,6 +1005,12 @@ bool lsplt_commit_hook(void) {
 
 bool invalidate_backups(void) {
   pthread_mutex_lock(&g_hook_mutex);
+
+  if (!g_hook_infos) {
+    pthread_mutex_unlock(&g_hook_mutex);
+
+    return true;
+  }
 
   bool res = true;
   for (size_t i = 0; i < g_hook_infos->length; i++) {
