@@ -17,6 +17,11 @@ struct Elf {
 
   const char *dyn_str_;  /* INFO: .dynstr (string-table) */
   ElfW(Sym) *dyn_sym_;   /* INFO: .dynsym (symbol-index to string-table's offset) */
+  ElfW(Word) dyn_str_size_;
+
+  ElfW(Addr) relr_;  /* INFO: .relr.dyn / android.rel[r] */
+  ElfW(Word) relr_size_;
+  ElfW(Word) relr_entry_size_;
 
   ElfW(Addr) rel_plt_;  /* INFO: .rel.plt or .rela.plt */
   ElfW(Word) rel_plt_size_;
@@ -34,11 +39,14 @@ struct Elf {
 
   /* INFO: append for GNU hash */
   uint32_t sym_offset_;
+  uint32_t sym_count_;
   ElfW(Addr) *bloom_;
   uint32_t bloom_size_;
   uint32_t bloom_shift_;
 
-  bool is_use_rela_;
+  bool rel_plt_is_rela_;
+  bool rel_dyn_is_rela_;
+  bool rel_android_is_rela_;
   bool valid_;
 };
 

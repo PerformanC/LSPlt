@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <limits.h>
+#include <stdint.h>
 
 #include "logging.h"
 
@@ -31,11 +33,45 @@
 
 #ifdef __LP64__
   #define ELF_R_SYM(info) ELF64_R_SYM(info)
+  #define ELF_R_INFO(sym, type) ELF64_R_INFO(sym, type)
   #define ELF_R_TYPE(info) ELF64_R_TYPE(info)
 #else
   #define ELF_R_SYM(info) ELF32_R_SYM(info)
+  #define ELF_R_INFO(sym, type) ELF32_R_INFO(sym, type)
   #define ELF_R_TYPE(info) ELF32_R_TYPE(info)
 #endif
+
+struct sleb128_decoder {
+  const uint8_t *current;
+  const uint8_t *end;
+};
+
+static void sleb128_decoder_init(struct sleb128_decoder *decoder, const uint8_t *buffer, size_t count) {
+  decoder->current = buffer;
+  decoder->end = buffer + count;
+}
+
+static int64_t sleb128_decode(struct sleb128_decoder *decoder) {
+  int64_t value = 0;
+  size_t shift = 0;
+  uint8_t byte;
+  const size_t size = sizeof(int64_t) * CHAR_BIT;
+
+  do {
+    if (decoder->current >= decoder->end)
+      LOGF("Failed to decode SLEB128: buffer overrun");
+
+    byte = *decoder->current++;
+    value |= ((int64_t)(byte & 0x7F)) << shift;
+    shift += 7;
+  } while (byte & 0x80);
+
+  if (shift < size && (byte & 0x40)) {
+    value |= -((int64_t)1 << shift);
+  }
+
+  return value;
+}
 
 static void *offset_of(ElfW(Ehdr) *head, ElfW(Off) off) {
   return (void *)(uintptr_t)head + off;
@@ -58,6 +94,8 @@ static bool set_by_offset(ElfW(Addr) *ptr, ElfW(Addr) base, ElfW(Addr) bias, Elf
 }
 
 void elfutil_init(struct Elf *elf, uintptr_t base_addr) {
+  memset(elf, 0, sizeof(*elf));
+
   elf->header_ = (ElfW(Ehdr) *)base_addr;
   elf->base_addr_ = base_addr;
 
@@ -149,7 +187,7 @@ void elfutil_init(struct Elf *elf, uintptr_t base_addr) {
         break;
       }
       case DT_PLTREL: {
-        elf->is_use_rela_ = dynamic->d_un.d_val == DT_RELA;
+        elf->rel_plt_is_rela_ = dynamic->d_un.d_val == DT_RELA;
 
         break;
       }
@@ -163,9 +201,15 @@ void elfutil_init(struct Elf *elf, uintptr_t base_addr) {
 
         break;
       }
-      case DT_REL:
+      case DT_REL: {
+        if (!set_by_offset((ElfW(Addr) *)&elf->rel_dyn_, elf->base_addr_, elf->bias_addr_, dynamic->d_un.d_ptr)) return;
+        elf->rel_dyn_is_rela_ = false;
+
+        break;
+      }
       case DT_RELA: {
         if (!set_by_offset((ElfW(Addr) *)&elf->rel_dyn_, elf->base_addr_, elf->bias_addr_, dynamic->d_un.d_ptr)) return;
+        elf->rel_dyn_is_rela_ = true;
 
         break;
       }
@@ -175,9 +219,15 @@ void elfutil_init(struct Elf *elf, uintptr_t base_addr) {
 
         break;
       }
-      case DT_ANDROID_REL:
+      case DT_ANDROID_REL: {
+        if (!set_by_offset((ElfW(Addr) *)&elf->rel_android_, elf->base_addr_, elf->bias_addr_, dynamic->d_un.d_ptr)) return;
+        elf->rel_android_is_rela_ = false;
+
+        break;
+      }
       case DT_ANDROID_RELA: {
         if (!set_by_offset((ElfW(Addr) *)&elf->rel_android_, elf->base_addr_, elf->bias_addr_, dynamic->d_un.d_ptr)) return;
+        elf->rel_android_is_rela_ = true;
 
         break;
       }
@@ -226,31 +276,141 @@ void elfutil_init(struct Elf *elf, uintptr_t base_addr) {
   elf->valid_ = true;
 }
 
+struct android_reloc_buffer {
+  void *data;
+  ElfW(Word) size;
+};
+
+/* INFO: Copyright ThePedroo 2025. CSOLoader code. Licensed under AGPL-3 */
+static bool elfutil_unpack_android_relocs(const struct Elf *elf, struct android_reloc_buffer *buffer) {
+  if (!elf->rel_android_ || elf->rel_android_size_ == 0) return false;
+
+  struct sleb128_decoder decoder;
+  sleb128_decoder_init(&decoder, (const uint8_t *)elf->rel_android_, elf->rel_android_size_);
+
+  uint64_t num_relocs = sleb128_decode(&decoder);
+  if (num_relocs <= 0) return false;
+
+  size_t out_index = 0;
+  void *entries = calloc(num_relocs, elf->rel_android_is_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel)));
+  if (!entries) {
+    LOGE("Failed to allocate buffer for Android packed relocations");
+
+    return false;
+  }
+
+  ElfW(Addr) current_offset = (ElfW(Addr))sleb128_decode(&decoder);
+
+  for (uint64_t i = 0; i < num_relocs; ) {
+    uint64_t group_size = sleb128_decode(&decoder);
+    uint64_t group_flags = sleb128_decode(&decoder);
+
+    size_t group_r_offset_delta = 0;
+
+    const size_t RELOCATION_GROUPED_BY_INFO_FLAG = 1;
+    const size_t RELOCATION_GROUPED_BY_OFFSET_DELTA_FLAG = 2;
+    const size_t RELOCATION_GROUPED_BY_ADDEND_FLAG = 4;
+    const size_t RELOCATION_GROUP_HAS_ADDEND_FLAG = 8;
+
+    if (group_flags & RELOCATION_GROUPED_BY_OFFSET_DELTA_FLAG) {
+      group_r_offset_delta = sleb128_decode(&decoder);
+    }
+
+
+    uint32_t sym_idx = 0;
+    uint32_t type = 0;
+    uint32_t r_addend = 0;
+
+    if (group_flags & RELOCATION_GROUPED_BY_INFO_FLAG) {
+      ElfW(Addr) r_info = sleb128_decode(&decoder);
+      sym_idx = ELF_R_SYM(r_info);
+      type = ELF_R_TYPE(r_info);
+    }
+
+    size_t group_flags_reloc;
+    if (elf->rel_android_is_rela_) {
+      group_flags_reloc = group_flags & (RELOCATION_GROUP_HAS_ADDEND_FLAG | RELOCATION_GROUPED_BY_ADDEND_FLAG);
+
+      if (group_flags_reloc == RELOCATION_GROUP_HAS_ADDEND_FLAG) {
+        /* INFO: Each relocation has an addend. This is the default situation
+                    with lld's current encoder. */
+      } else if (group_flags_reloc == (RELOCATION_GROUP_HAS_ADDEND_FLAG | RELOCATION_GROUPED_BY_ADDEND_FLAG)) {
+        r_addend += sleb128_decode(&decoder);
+      } else {
+        r_addend = 0;
+      }
+    } else {
+      if (group_flags & RELOCATION_GROUP_HAS_ADDEND_FLAG)
+        LOGF("REL relocations should not have addends, but found one in group %llu", (unsigned long long)i);
+    }
+
+    for (size_t i = 0; i < group_size; ++i) {
+      if (group_flags & RELOCATION_GROUPED_BY_OFFSET_DELTA_FLAG) {
+        current_offset += group_r_offset_delta;
+      } else {
+        current_offset += sleb128_decode(&decoder);
+      }
+      if ((group_flags & RELOCATION_GROUPED_BY_INFO_FLAG) == 0) {
+        ElfW(Addr) r_info = sleb128_decode(&decoder);
+        sym_idx = ELF_R_SYM(r_info);
+        type = ELF_R_TYPE(r_info);
+      }
+
+      if (elf->rel_android_is_rela_ && group_flags_reloc == RELOCATION_GROUP_HAS_ADDEND_FLAG)
+        r_addend += sleb128_decode(&decoder);
+
+      if (elf->rel_android_is_rela_) {
+        ElfW(Rela) *rela = (ElfW(Rela) *)entries;
+        rela[out_index].r_offset = current_offset;
+        rela[out_index].r_info = ELF_R_INFO(sym_idx, type);
+        rela[out_index].r_addend = r_addend;
+      } else {
+        ElfW(Rel) *rel = (ElfW(Rel) *)entries;
+        rel[out_index].r_offset = current_offset;
+        rel[out_index].r_info = ELF_R_INFO(sym_idx, type);
+      }
+      out_index++;
+    }
+
+    i += group_size;
+  }
+
+  buffer->data = entries;
+  buffer->size = out_index * (elf->rel_android_is_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel)));
+
+  return true;
+}
+
 static uint32_t elfutil_gnu_lookup(const struct Elf *elf, const char *name) {
   static uint32_t kBloomMaskBits = sizeof(ElfW(Addr) *) * 8;
   static uint32_t kInitialHash = 5381;
   static uint32_t kHashShift = 5;
 
-  if (!elf->bucket_ || !elf->bloom_ || !elf->bloom_size_) return 0;
+  if (!elf->bucket_ || !elf->bucket_count_ || !elf->bloom_ || !elf->bloom_size_) return 0;
 
   uint32_t hash = kInitialHash;
   for (int i = 0; name[i]; i++) {
     hash += (hash << kHashShift) + name[i];
   }
 
-  ElfW(Addr) bloom_word = elf->bloom_[(hash / kBloomMaskBits) % elf->bloom_size_];
-  uintptr_t mask = 0 | (uintptr_t)1 << (hash % kBloomMaskBits) | (uintptr_t)1 << ((hash >> elf->bloom_shift_) % kBloomMaskBits);
-  if ((mask & bloom_word) == mask) {
-    int idx = elf->bucket_[hash % elf->bucket_count_];
-    const char *strings = elf->dyn_str_;
+  uint32_t bloom_idx = (hash / kBloomMaskBits) % elf->bloom_size_;
+  ElfW(Addr) bloom_word = elf->bloom_[bloom_idx];
+  uintptr_t bit_lo = (uintptr_t)1 << (hash % kBloomMaskBits);
+  uintptr_t bit_hi = (uintptr_t)1 << ((hash >> elf->bloom_shift_) % kBloomMaskBits);
+  uintptr_t mask = bit_lo | bit_hi;
+  if ((mask & bloom_word) != mask) return 0;
 
-    do {
-      if ((uint32_t)idx >= elf->sym_offset_) break;
+  uint32_t idx = elf->bucket_[hash % elf->bucket_count_];
+  if (idx < elf->sym_offset_) return 0;
 
-      ElfW(Sym) *sym = elf->dyn_sym_ + idx;
-      if (((elf->chain_[idx] ^ hash) >> 1) == 0 && strcmp(name, strings + sym->st_name) == 0)
-        return idx;
-    } while ((elf->chain_[idx++] & 1) == 0);
+  const char *strings = elf->dyn_str_;
+  for (;; idx++) {
+    ElfW(Sym) *sym = elf->dyn_sym_ + idx;
+    if (((elf->chain_[idx] ^ hash) >> 1) == 0 && strcmp(name, strings + sym->st_name) == 0) {
+      return idx;
+    }
+
+    if (elf->chain_[idx] & 1) break;
   }
 
   return 0;
@@ -295,13 +455,13 @@ static uint32_t elfutil_linear_lookup(const struct Elf *elf, const char *name) {
 }
 
 static void elfutil_looper(const struct Elf *elf, uint32_t idx, const void *rel_ptr, const ElfW(Word) rel_size,
-                           bool is_plt, uintptr_t **res, size_t *res_size) {
+                           bool is_rela, bool is_plt, uintptr_t **res, size_t *res_size) {
   const void *rel_end = (const void *)((uintptr_t)rel_ptr + rel_size);
 
-  size_t rel_entry_size = elf->is_use_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
+  size_t rel_entry_size = is_rela ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
   for (const char *p = (const char *)rel_ptr; p < (const char *)rel_end; p += rel_entry_size) {
-    ElfW(Xword) r_info   = elf->is_use_rela_ ? ((const ElfW(Rela) *)p)->r_info : ((const ElfW(Rel) *)p)->r_info;
-    ElfW(Addr)  r_offset = elf->is_use_rela_ ? ((const ElfW(Rela) *)p)->r_offset : ((const ElfW(Rel) *)p)->r_offset;
+    ElfW(Xword) r_info   = is_rela ? ((const ElfW(Rela) *)p)->r_info : ((const ElfW(Rel) *)p)->r_info;
+    ElfW(Addr)  r_offset = is_rela ? ((const ElfW(Rela) *)p)->r_offset : ((const ElfW(Rel) *)p)->r_offset;
     uint32_t    r_sym    = ELF_R_SYM(r_info);
     uint32_t    r_type   = ELF_R_TYPE(r_info);
 
@@ -342,24 +502,31 @@ size_t elfutil_find_plt_addr(const struct Elf *elf, const char *name, uintptr_t 
   *out_addrs = NULL;
   size_t count = 0;
 
-  elfutil_looper(elf, idx, (void *)elf->rel_plt_,     elf->rel_plt_size_,     true,  out_addrs, &count);
-  elfutil_looper(elf, idx, (void *)elf->rel_dyn_,     elf->rel_dyn_size_,     false, out_addrs, &count);
-  elfutil_looper(elf, idx, (void *)elf->rel_android_, elf->rel_android_size_, false, out_addrs, &count);
+  elfutil_looper(elf, idx, (void *)elf->rel_plt_,     elf->rel_plt_size_,     elf->rel_plt_is_rela_,     true,  out_addrs, &count);
+  elfutil_looper(elf, idx, (void *)elf->rel_dyn_,     elf->rel_dyn_size_,     elf->rel_dyn_is_rela_,     false, out_addrs, &count);
+
+  struct android_reloc_buffer android_buffer = { 0 };
+  if (elfutil_unpack_android_relocs(elf, &android_buffer)) {
+    elfutil_looper(elf, idx, android_buffer.data, android_buffer.size, elf->rel_android_is_rela_, false, out_addrs, &count);
+    free(android_buffer.data);
+  }
 
   return count;
 }
 
 static void elfutil_looper_by_prefix(const struct Elf *elf, const void *rel_ptr, const ElfW(Word) rel_size,
-                                     bool is_plt, const char *name_prefix, size_t prefix_len,
+                                     bool is_rela, bool is_plt, const char *name_prefix, size_t prefix_len,
                                      uintptr_t **res, size_t *res_size) {
   if (!rel_ptr || rel_size == 0 || !elf->dyn_sym_ || !elf->dyn_str_) return;
 
+  LOGD("Looping through them.");
+
   const void *rel_end = (const void *)((uintptr_t)rel_ptr + rel_size);
-  size_t rel_entry_size = elf->is_use_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
+  size_t rel_entry_size = is_rela ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
 
   for (const char *p = (const char *)rel_ptr; p < (const char *)rel_end; p += rel_entry_size) {
-    ElfW(Xword) r_info   = elf->is_use_rela_ ? ((const ElfW(Rela) *)p)->r_info : ((const ElfW(Rel) *)p)->r_info;
-    ElfW(Addr)  r_offset = elf->is_use_rela_ ? ((const ElfW(Rela) *)p)->r_offset : ((const ElfW(Rel) *)p)->r_offset;
+    ElfW(Xword) r_info   = is_rela ? ((const ElfW(Rela) *)p)->r_info : ((const ElfW(Rel) *)p)->r_info;
+    ElfW(Addr)  r_offset = is_rela ? ((const ElfW(Rela) *)p)->r_offset : ((const ElfW(Rel) *)p)->r_offset;
     uint32_t    r_sym    = ELF_R_SYM(r_info);
     uint32_t    r_type   = ELF_R_TYPE(r_info);
 
@@ -402,9 +569,14 @@ size_t elfutil_find_plt_addr_by_prefix(const struct Elf *elf, const char *name_p
   size_t count = 0;
   uintptr_t *res = NULL;
 
-  elfutil_looper_by_prefix(elf, (void *)elf->rel_plt_,     elf->rel_plt_size_,     true,  name_prefix, prefix_len, &res, &count);
-  elfutil_looper_by_prefix(elf, (void *)elf->rel_dyn_,     elf->rel_dyn_size_,     false, name_prefix, prefix_len, &res, &count);
-  elfutil_looper_by_prefix(elf, (void *)elf->rel_android_, elf->rel_android_size_, false, name_prefix, prefix_len, &res, &count);
+  elfutil_looper_by_prefix(elf, (void *)elf->rel_plt_,     elf->rel_plt_size_,     elf->rel_plt_is_rela_,     true,  name_prefix, prefix_len, &res, &count);
+  elfutil_looper_by_prefix(elf, (void *)elf->rel_dyn_,     elf->rel_dyn_size_,     elf->rel_dyn_is_rela_,     false, name_prefix, prefix_len, &res, &count);
+
+  struct android_reloc_buffer android_buffer = { 0 };
+  if (elfutil_unpack_android_relocs(elf, &android_buffer)) {
+    elfutil_looper_by_prefix(elf, android_buffer.data, android_buffer.size, elf->rel_android_is_rela_, false, name_prefix, prefix_len, &res, &count);
+    free(android_buffer.data);
+  }
 
   *out_addrs = res;
 
