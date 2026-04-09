@@ -19,6 +19,10 @@
 
 #include "lsplt.h"
 
+#ifndef MAP_FIXED_NOREPLACE
+  #define MAP_FIXED_NOREPLACE 0x100000
+#endif
+
 struct lsplt_register_info {
   dev_t dev;
   ino_t inode;
@@ -80,6 +84,74 @@ static inline char *page_end(uintptr_t addr) {
 
   return (char *)((addr / k_page_size * k_page_size) + k_page_size);
 }
+
+static inline uintptr_t align_up_uintptr(uintptr_t value, uintptr_t alignment) {
+  return (value + alignment - 1) & ~(alignment - 1);
+}
+
+#ifdef __LP64__
+  /* INFO: Pick the highest parsed 4GiB+ gap so the backup stays far from the
+             mappings that the process is more likely to create next. Also skip
+             the gap immediately after the contiguous self mapping cluster. */
+  static void *find_highest_detached_backup_base(size_t needed_size) {
+    struct lsplt_map_info *maps = lsplt_scan_maps("self");
+    if (!maps) return NULL;
+
+    if (k_page_size == 0) k_page_size = getpagesize();
+    needed_size = (size_t)align_up_uintptr((uintptr_t)needed_size, k_page_size);
+
+    const uintptr_t min_addr = 0x100000000ULL;
+    const uintptr_t self_addr = (uintptr_t)find_highest_detached_backup_base;
+    uintptr_t self_region_end = 0;
+    size_t self_idx = maps->length;
+
+    for (size_t i = 0; i < maps->length; ++i) {
+      struct lsplt_map_entry *map = &maps->maps[i];
+      if (self_addr < map->start || self_addr >= map->end) continue;
+
+      self_region_end = map->end;
+      self_idx = i;
+
+      break;
+    }
+
+    if (self_idx == maps->length) {
+      LOGE("Failed to locate self mapping for detached backup hint");
+
+      lsplt_free_maps(maps);
+
+      return NULL;
+    }
+
+    for (size_t i = self_idx + 1; i < maps->length; ++i) {
+      struct lsplt_map_entry *map = &maps->maps[i];
+      uintptr_t expected_start = align_up_uintptr(self_region_end, k_page_size);
+      if (map->start > expected_start) break;
+
+      self_region_end = map->end;
+    }
+
+    uintptr_t prev_end = 0;
+    uintptr_t hint = 0;
+
+    for (size_t i = 0; i < maps->length; ++i) {
+      struct lsplt_map_entry *map = &maps->maps[i];
+      uintptr_t gap_start = align_up_uintptr(prev_end ? prev_end : min_addr, k_page_size);
+      if (gap_start < self_region_end && self_region_end <= map->start) {
+        prev_end = map->end;
+
+        continue;
+      }
+
+      if (map->start > gap_start && needed_size <= map->start - gap_start) hint = gap_start;
+      prev_end = map->end;
+    }
+
+    lsplt_free_maps(maps);
+
+    return (void *)hint;
+  }
+#endif
 
 static inline void *lsplt_memcpy(void *dst, const void *src, size_t len) {
   unsigned char *d = (unsigned char *)dst;
@@ -479,14 +551,29 @@ static bool do_hook_addr(struct lsplt_hook_infos *infos, uintptr_t addr, uintptr
   const size_t len = info->map.end - info->map.start;
 
   if (!info->backup_region && !info->self) {
-    void *backup_addr = sys_mmap(NULL, len, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    LOGD("Backup %p to %p", (void *)info->map.start, backup_addr);
+    #ifdef __LP64__
+      void *hint = find_highest_detached_backup_base(len);
+      if (!hint) {
+        LOGE("Failed to find detached backup region for %p", (void *)info->map.start);
 
+        return false;
+      }
+
+      void *backup_addr = sys_mmap(hint, len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    #else
+      void *backup_addr = sys_mmap(NULL, len, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    #endif
     if (backup_addr == MAP_FAILED) {
-      LOGE("Failed to allocate backup region for %p", (void *)info->map.start);
+      #ifdef __LP64__
+        LOGE("Failed to allocate backup region at hint %p for %p: %s", hint, (void *)info->map.start, strerror(errno));
+      #else
+        LOGE("Failed to allocate backup region for %p", (void *)info->map.start);
+      #endif
 
       return false;
     }
+
+    LOGD("Backup %p to %p", (void *)info->map.start, backup_addr);
 
     void *new_addr = sys_mremap((void *)info->map.start, len, len, MREMAP_FIXED | MREMAP_MAYMOVE, backup_addr);
     if (new_addr == MAP_FAILED || new_addr != backup_addr) {
