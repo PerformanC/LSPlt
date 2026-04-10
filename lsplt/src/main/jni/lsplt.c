@@ -85,11 +85,11 @@ static inline char *page_end(uintptr_t addr) {
   return (char *)((addr / k_page_size * k_page_size) + k_page_size);
 }
 
-static inline uintptr_t align_up_uintptr(uintptr_t value, uintptr_t alignment) {
-  return (value + alignment - 1) & ~(alignment - 1);
-}
-
 #ifdef __LP64__
+  static inline uintptr_t align_up_uintptr(uintptr_t value, uintptr_t alignment) {
+    return (value + alignment - 1) & ~(alignment - 1);
+  }
+
   /* INFO: Pick the highest parsed 4GiB+ gap so the backup stays far from the
              mappings that the process is more likely to create next. Also skip
              the gap immediately after the contiguous self mapping cluster. */
