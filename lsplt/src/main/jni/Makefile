@@ -6,8 +6,15 @@ out ?= build/$(BUILD_TYPE)/$(ARCH)
 
 TOOLCHAIN = $(NDK_PATH)/toolchains/llvm/prebuilt/linux-x86_64
 SYSROOT = $(TOOLCHAIN)/sysroot
-CC = $(TOOLCHAIN)/bin/clang
-AR = $(TOOLCHAIN)/bin/llvm-ar
+
+ifeq ($(TERMUX_VERSION),)
+	CC = $(TOOLCHAIN)/bin/clang
+	AR = $(TOOLCHAIN)/bin/llvm-ar
+else
+	CC = clang
+	AR = llvm-ar
+endif
+
 
 TARGET_arm64-v8a = aarch64-linux-android$(API_LEVEL)
 TARGET_armeabi-v7a = armv7a-linux-androideabi$(API_LEVEL)
